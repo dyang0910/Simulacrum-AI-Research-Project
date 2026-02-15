@@ -1,5 +1,5 @@
 import jax.numpy as jnp
-from jax import jit
+from jax import jit, lax
 from functools import lru_cache
 from utils import (
     ensure_float,
@@ -8,7 +8,6 @@ from utils import (
     _add_conformal_intervals,
     _add_predict_conformal_intervals,
     _intervals,
-    _chunk_forecast,
     _expand_fitted_intervals,
     _store_cs
 )
@@ -17,27 +16,104 @@ from typing import Optional, List
 from conformal_intervals import ConformalIntervals
 import warnings
 
+_ALPHA_LOWER = 0.1
+_ALPHA_UPPER = 0.3
+_GOLDEN_RATIO = 0.6180339887498949
+_ALPHA_SEARCH_ITERS = 16
+
+
 def _interval_mean(y: jnp.ndarray) -> jnp.ndarray:
-    y_intervals = _intervals(y)
-    valid_count = jnp.count_nonzero(y_intervals)
-    return jnp.where(valid_count > 0, jnp.sum(y_intervals) / valid_count, 1.0)
+    nonzero_idxs = jnp.where(y != 0)[0]
+    if nonzero_idxs.size == 0:
+        return jnp.array(1.0, dtype=y.dtype)
+    intervals = jnp.diff(nonzero_idxs + 1, prepend=0).astype(y.dtype)
+    return intervals.mean()
+
+
+def _ses_sse(alpha: jnp.ndarray, x: jnp.ndarray) -> jnp.ndarray:
+    complement = 1.0 - alpha
+    init_carry = (x[0], jnp.array(0.0, dtype=x.dtype))
+
+    def body(i: int, carry):
+        forecast, sse = carry
+        forecast = alpha * x[i - 1] + complement * forecast
+        err = x[i] - forecast
+        return forecast, sse + err * err
+
+    _, sse = lax.fori_loop(1, x.shape[0], body, init_carry)
+    return sse
+
+
+def _ses_forecast(alpha: jnp.ndarray, x: jnp.ndarray) -> jnp.ndarray:
+    complement = 1.0 - alpha
+
+    def body(i: int, forecast: jnp.ndarray):
+        return alpha * x[i - 1] + complement * forecast
+
+    fitted_last = lax.fori_loop(1, x.shape[0], body, x[0])
+    return alpha * x[-1] + complement * fitted_last
+
+
+def _optimized_ses_forecast(x: jnp.ndarray) -> jnp.ndarray:
+    left = jnp.array(_ALPHA_LOWER, dtype=x.dtype)
+    right = jnp.array(_ALPHA_UPPER, dtype=x.dtype)
+    ratio = jnp.array(_GOLDEN_RATIO, dtype=x.dtype)
+    c = right - ratio * (right - left)
+    d = left + ratio * (right - left)
+    fc = _ses_sse(c, x)
+    fd = _ses_sse(d, x)
+
+    def step(_: int, state):
+        left, right, c, d, fc, fd = state
+
+        def keep_left(curr):
+            left, right, c, d, fc, fd = curr
+            right = d
+            d = c
+            fd = fc
+            c = right - ratio * (right - left)
+            fc = _ses_sse(c, x)
+            return left, right, c, d, fc, fd
+
+        def keep_right(curr):
+            left, right, c, d, fc, fd = curr
+            left = c
+            c = d
+            fc = fd
+            d = left + ratio * (right - left)
+            fd = _ses_sse(d, x)
+            return left, right, c, d, fc, fd
+
+        return lax.cond(fc <= fd, keep_left, keep_right, state)
+
+    left, right, _, _, _, _ = lax.fori_loop(
+        0, _ALPHA_SEARCH_ITERS, step, (left, right, c, d, fc, fd)
+    )
+    alpha = 0.5 * (left + right)
+    return _ses_forecast(alpha, x)
 
 
 @lru_cache(maxsize=256)
 def _get_chunk_forecast_runner(aggregation_level: int):
     aggregation_level = max(1, int(aggregation_level))
 
-    compiled = jit(lambda series: _chunk_forecast(series, aggregation_level))
-    state = {"use_jit": True}
-
+    @jit
     def _run(series: jnp.ndarray):
-        # Cache the decision so fallback costs are paid only once.
-        if state["use_jit"]:
-            try:
-                return compiled(series)
-            except Exception:
-                state["use_jit"] = False
-        return _chunk_forecast(series, aggregation_level)
+        lost_remainder_data = series.shape[0] % aggregation_level
+        y_cut = series[lost_remainder_data:]
+        n_chunks = y_cut.shape[0] // aggregation_level
+
+        if n_chunks == 0:
+            return jnp.array(0.0, dtype=series.dtype)
+
+        aggregation_sums = y_cut[: n_chunks * aggregation_level].reshape(
+            (n_chunks, aggregation_level)
+        ).sum(axis=1)
+
+        if n_chunks == 1:
+            return aggregation_sums[0]
+
+        return _optimized_ses_forecast(aggregation_sums)
 
     return _run
 
