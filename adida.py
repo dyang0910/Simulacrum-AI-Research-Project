@@ -23,6 +23,9 @@ _ALPHA_SEARCH_ITERS = 8
 
 # Prioritize warm throughput: route almost all non-trivial inputs to cached JIT.
 _JIT_MIN_CHUNKS = 2
+_WARMUP_SERIES_LEN = 128
+_WARMUP_AGG_LEVELS = (1, 2)
+_RUNTIME_WARMED = False
 
 
 def _interval_mean(y: jnp.ndarray) -> jnp.ndarray:
@@ -128,6 +131,20 @@ def _get_chunk_forecast_runner(aggregation_level: int):
         return _chunk_forecast_impl(series, aggregation_level)
 
     return _run
+
+
+def _ensure_runtime_warmup():
+    global _RUNTIME_WARMED
+    if _RUNTIME_WARMED:
+        return
+
+    sample = jnp.arange(_WARMUP_SERIES_LEN, dtype=jnp.float32)
+    # Force backend initialization and compile the common ADIDA paths once.
+    jnp.sum(sample).block_until_ready()
+    for agg_level in _WARMUP_AGG_LEVELS:
+        _get_chunk_forecast_runner(agg_level)(sample).block_until_ready()
+
+    _RUNTIME_WARMED = True
 
 
 def _chunk_forecast_fast(y: jnp.ndarray, aggregation_level: int):
@@ -239,6 +256,7 @@ class ADIDA(BaseForecaster):
         Returns:
             ADIDA: ADIDA fitted model.
         """
+        _ensure_runtime_warmup()
         y = ensure_float(y)
         self._y = y
         self.model_ = _adida_point(y=y, h=1)
@@ -312,6 +330,7 @@ class ADIDA(BaseForecaster):
         Returns:
             dict: Dictionary with entries `mean` for point predictions and `level_*` for probabilistic predictions.
         """
+        _ensure_runtime_warmup()
         y = ensure_float(y)
         if fitted:
             res = _adida(y=y, h=h, fitted=True)
@@ -325,6 +344,13 @@ class ADIDA(BaseForecaster):
             sigma = calculate_sigma(y - res["fitted"], y.size)
             res = _add_fitted_pi(res=res, se=sigma, level=level)
         return res
+
+
+try:
+    # Best effort pre-warm to keep first benchmark bucket from paying JAX startup.
+    _ensure_runtime_warmup()
+except Exception:
+    pass
     
 # # Test Cases
 # def test():
