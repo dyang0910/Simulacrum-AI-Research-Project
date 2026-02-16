@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 from jax import jit, lax
 from functools import lru_cache
@@ -136,7 +137,9 @@ def _chunk_forecast_fast(y: jnp.ndarray, aggregation_level: int):
 
     # Tiny inputs stay eager; otherwise compiled path is materially faster on warm calls.
     if n_chunks < _JIT_MIN_CHUNKS:
-        return _chunk_forecast_impl(y, aggregation_level)
+        # Avoid tracing overhead from lax control flow on very small arrays.
+        with jax.disable_jit():
+            return _chunk_forecast_impl(y, aggregation_level)
 
     return _get_chunk_forecast_runner(aggregation_level)(y)
 
