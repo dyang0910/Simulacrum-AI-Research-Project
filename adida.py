@@ -1,4 +1,3 @@
-import jax
 import jax.numpy as jnp
 from jax import jit, lax
 from functools import lru_cache
@@ -22,8 +21,8 @@ _ALPHA_UPPER = 0.3
 _GOLDEN_RATIO = 0.6180339887498949
 _ALPHA_SEARCH_ITERS = 8
 
-# Prefer compiled execution for warm-path throughput; keep tiny inputs eager.
-_JIT_MIN_CHUNKS = 128
+# Prioritize warm throughput: route almost all non-trivial inputs to cached JIT.
+_JIT_MIN_CHUNKS = 2
 
 
 def _interval_mean(y: jnp.ndarray) -> jnp.ndarray:
@@ -135,11 +134,9 @@ def _chunk_forecast_fast(y: jnp.ndarray, aggregation_level: int):
     aggregation_level = max(1, int(aggregation_level))
     n_chunks = y.shape[0] // aggregation_level
 
-    # Tiny inputs stay eager; otherwise compiled path is materially faster on warm calls.
+    # Only the degenerate case stays eager; warm path should hit cached JIT.
     if n_chunks < _JIT_MIN_CHUNKS:
-        # Avoid tracing overhead from lax control flow on very small arrays.
-        with jax.disable_jit():
-            return _chunk_forecast_impl(y, aggregation_level)
+        return _chunk_forecast_impl(y, aggregation_level)
 
     return _get_chunk_forecast_runner(aggregation_level)(y)
 
