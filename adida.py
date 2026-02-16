@@ -1,4 +1,3 @@
-import jax
 import jax.numpy as jnp
 from jax import jit, lax
 from functools import lru_cache
@@ -20,19 +19,23 @@ import warnings
 _ALPHA_LOWER = 0.1
 _ALPHA_UPPER = 0.3
 _GOLDEN_RATIO = 0.6180339887498949
-_ALPHA_SEARCH_ITERS = 10
+_ALPHA_SEARCH_ITERS = 8
 
-# Keep small/medium aggregated series on eager JAX to avoid first-call XLA compile
-# latency from control-flow primitives. Larger series still benefit from cached JIT.
-_JIT_MIN_CHUNKS = 2048
+# Prefer compiled execution for warm-path throughput; keep tiny inputs eager.
+_JIT_MIN_CHUNKS = 128
 
 
 def _interval_mean(y: jnp.ndarray) -> jnp.ndarray:
-    nonzero_idxs = jnp.where(y != 0)[0]
-    if nonzero_idxs.size == 0:
+    nonzero_mask = y != 0
+    nonzero_count = jnp.count_nonzero(nonzero_mask)
+    if nonzero_count == 0:
         return jnp.array(1.0, dtype=y.dtype)
-    intervals = jnp.diff(nonzero_idxs + 1, prepend=0).astype(y.dtype)
-    return intervals.mean()
+
+    # mean(diff(nonzero_idxs + 1, prepend=0)) == (last_nonzero_idx + 1) / count_nonzero
+    last_nonzero_idx = jnp.max(
+        jnp.where(nonzero_mask, jnp.arange(y.shape[0], dtype=jnp.int32), 0)
+    )
+    return (last_nonzero_idx.astype(y.dtype) + 1.0) / nonzero_count.astype(y.dtype)
 
 
 def _ses_sse(alpha: jnp.ndarray, x: jnp.ndarray) -> jnp.ndarray:
@@ -131,11 +134,9 @@ def _chunk_forecast_fast(y: jnp.ndarray, aggregation_level: int):
     aggregation_level = max(1, int(aggregation_level))
     n_chunks = y.shape[0] // aggregation_level
 
-    # `lax.fori_loop`/`lax.cond` still trigger tracing overhead outside `jit`.
-    # For small/medium chunk counts we force eager execution to cut cold latency.
+    # Tiny inputs stay eager; otherwise compiled path is materially faster on warm calls.
     if n_chunks < _JIT_MIN_CHUNKS:
-        with jax.disable_jit():
-            return _chunk_forecast_impl(y, aggregation_level)
+        return _chunk_forecast_impl(y, aggregation_level)
 
     return _get_chunk_forecast_runner(aggregation_level)(y)
 
