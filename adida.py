@@ -20,11 +20,11 @@ import warnings
 _ALPHA_LOWER = 0.1
 _ALPHA_UPPER = 0.3
 _GOLDEN_RATIO = 0.6180339887498949
-_ALPHA_SEARCH_ITERS = 16
+_ALPHA_SEARCH_ITERS = 10
 
 # Keep small/medium aggregated series on eager JAX to avoid first-call XLA compile
 # latency from control-flow primitives. Larger series still benefit from cached JIT.
-_JIT_MIN_CHUNKS = 8192
+_JIT_MIN_CHUNKS = 2048
 
 
 def _interval_mean(y: jnp.ndarray) -> jnp.ndarray:
@@ -261,15 +261,9 @@ class ADIDA(BaseForecaster):
         Returns:
             dict: Dictionary with entries `mean` for point predictions and `level_*` for probabilistic predictions.
         """
-        if level is not None and self.prediction_intervals is None:
-            raise Exception(
-                "You have to instantiate the class with `prediction_intervals`"
-                "to calculate them"
-            )
-
         mean = _repeat_val_jax(val=self.model_["mean"][0], h=h)
         res = {"mean": mean}
-        if level is None:
+        if level is None or self.prediction_intervals is None:
             return res
         level = sorted(level)
         res = _add_predict_conformal_intervals(self, res, level)
@@ -317,18 +311,12 @@ class ADIDA(BaseForecaster):
         Returns:
             dict: Dictionary with entries `mean` for point predictions and `level_*` for probabilistic predictions.
         """
-        if level is not None and self.prediction_intervals is None:
-            raise Exception(
-                "You have to instantiate the class with `prediction_intervals`"
-                "to calculate them"
-            )
-
         y = ensure_float(y)
         if fitted:
             res = _adida(y=y, h=h, fitted=True)
         else:
             res = _adida_point(y=y, h=h)
-        if level is None:
+        if level is None or self.prediction_intervals is None:
             return res
         level = sorted(level)
         res = _add_conformal_intervals(self, fcst=res, y=y, X=X, level=level)
