@@ -44,18 +44,7 @@ with st.sidebar:
         accept_multiple_files=True,
     )
 
-    api_key = st.text_input(
-        "OpenAI API key (optional)",
-        type="password",
-        value=os.getenv("OPENAI_API_KEY", ""),
-        help="When set, chat uses an LLM for richer analysis.",
-    )
-    model_name = st.text_input(
-        "OpenAI model",
-        value=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
-    )
-
-    if st.button("Analyze uploaded bills", use_container_width=True):
+        if st.button("Analyze uploaded bills", use_container_width=True):
         if not uploaded_files:
             st.warning("Please upload at least one document.")
         else:
@@ -169,7 +158,6 @@ with tab_chat:
                         question=user_question,
                         df=df,
                         records=records,
-                        api_key=api_key,
                         model=model_name,
                     )
                 st.markdown(answer)
