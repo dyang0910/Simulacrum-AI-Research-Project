@@ -1,0 +1,2 @@
+"""Bill AI dashboard package."""
+
