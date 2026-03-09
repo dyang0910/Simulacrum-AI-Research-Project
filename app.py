@@ -44,7 +44,7 @@ with st.sidebar:
         accept_multiple_files=True,
     )
 
-        if st.button("Analyze uploaded bills", use_container_width=True):
+    if st.button("Analyze uploaded bills", use_container_width=True):
         if not uploaded_files:
             st.warning("Please upload at least one document.")
         else:
